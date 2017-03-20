@@ -14,31 +14,44 @@ type GitURL struct {
 
 // Parse parses rawurl into a URL structure.
 func Parse(rawurl string) (*GitURL, error) {
-	u, err := parse(rawurl, rawurl)
-	return u, err
-}
+	munged := false
+	scheme, urlremainder, err := getscheme(rawurl)
 
-// Wrapper around net/url.Parse to try and support Git@/scp style remotes.
-func parse(rawurl string, origrawurl string) (*GitURL, error) {
-	url, err := url.Parse(rawurl)
-
-	if err == nil {
-		// If we needed to munge the raw URL, then strip the first character
-		// from the Path property (a colon : delimier turned in to a slash /).
-		if rawurl != origrawurl {
-			url.Path = url.Path[1:]
-		}
-
-		return &GitURL{*url}, err
+	// If there's a scheme:// but nothing left to the URL other than the scheme,
+	// (the urlremainder), then this is junk.
+	if err == nil && urlremainder == "" {
+		return nil, errors.New("malformed URL contains scheme only")
 	}
 
-	// From this point on we are going to try and munge the rawurl that we were
-	// passed, and see if we can parse them as any of the following Git@/scp
-	// type "URLs", all of which are assumed to use a URL scheme of ssh://, and
-	// contain at least host and path parts, delimited by a colon. They may
-	// optionally include a username part delimited with an @ symbol (but no
-	// password).
+	// If there's no scheme:// in the URL, then we may need to munge it.
+	if err != nil || scheme == "" {
+		if strings.Index(rawurl, ":") < 0 {
+			// TODO: Merge this particular munging into mungeGitURL().
+			rawurl = "file:///" + rawurl
+		} else {
+			mungedurl, err := mungeGitURL(rawurl)
+			if err != nil {
+				return nil, err
+			}
+			rawurl = mungedurl
+		}
+		munged = true
+	}
 
+	url, err := url.Parse(rawurl)
+	if err == nil {
+		// If we munged rawurl, then revert back the first character of the Path
+		// property (a colon : delimier turned in to a slash /).
+		if munged {
+			url.Path = url.Path[1:]
+		}
+	}
+
+	return &GitURL{*url}, err
+}
+
+// Munge the given Git@/scp rawurl in to a classical net/url parsable format.
+func mungeGitURL(rawurl string) (string, error) {
 	// host.xz:/path/to/repo.git/
 	// host.xz:~user/path/to/repo.git/
 	// host.xz:path/to/repo.git
@@ -50,17 +63,6 @@ func parse(rawurl string, origrawurl string) (*GitURL, error) {
 	// user@host.xz:~user/path/to/repo.git/
 	// user@host.xz:path/to/repo.git
 
-	// If we failed to parse the URL, but it has a URL scheme or doesn't
-	// contain a colon, then it doesn't match our edge case git@/scp format, so
-	// we will give up.
-	if strings.Index(rawurl, ":") < 0 {
-		return nil, err
-	}
-	scheme, _, schemeerr := getScheme(rawurl)
-	if schemeerr == nil || scheme != "" {
-		return nil, err
-	}
-
 	// Hopefully an edge case git@/scp type "URL" syntax.
 	i := strings.Index(rawurl, "]") // Does it look like we have an IPv6 host
 	j := 0
@@ -71,9 +73,8 @@ func parse(rawurl string, origrawurl string) (*GitURL, error) {
 	}
 
 	if j < 0 { // No colon in URL, so probably bogus.
-		err = errors.New("No colon (:) in URL to delimit host:path boundary; " +
-			"unable to munge Git remote edge case")
-		return nil, err
+		return "", errors.New("no colon (:) in URL to delimit host:path " +
+			"boundary; unable to munge Git remote edge case")
 	}
 
 	if i >= 0 { // Probably IPv6 hostname.
@@ -86,31 +87,32 @@ func parse(rawurl string, origrawurl string) (*GitURL, error) {
 		rawurl[:j] +
 		strings.Replace(rawurl[j:], ":", "/", 1)
 
-	// Reparse our munged URL.
-	return parse(mungedurl, origrawurl)
+	return mungedurl, nil
 }
 
-// Taken almost verbatim from net/url.
-func getScheme(rawurl string) (scheme, path string, err error) {
-	for i := 0; i < len(rawurl); i++ {
+// Returns scheme:// and remainder of URL from the given rawurl string.
+func getscheme(rawurl string) (string, string, error) {
+	urllen := len(rawurl)
+	for i := 0; i < urllen; i++ {
 		c := rawurl[i]
 		switch {
 		case 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z':
 		// do nothing
 		case '0' <= c && c <= '9' || c == '+' || c == '-' || c == '.':
 			if i == 0 {
-				return "", rawurl, errors.New("missing protocol scheme")
+				return "", "", errors.New("no scheme")
 			}
-		case c == ':':
-			if i == 0 {
-				return "", "", errors.New("missing protocol scheme")
+		case c == ':': // end of scheme
+			if i > 0 && urllen >= i+3 && rawurl[i+1:i+3] == "//" {
+				if urllen >= i+4 {
+					return rawurl[:i], rawurl[i+4:], nil
+				}
+				return rawurl[:i], "", nil
 			}
-			return rawurl[:i], rawurl[i+1:], nil
-		default:
-			// we have encountered an invalid character,
-			// so there is no valid scheme
-			return "", rawurl, errors.New("missing protocol scheme")
+			return "", "", errors.New("no scheme")
+		default: // illegal character
+			return "", "", errors.New("invalid character in scheme")
 		}
 	}
-	return "", rawurl, errors.New("missing protocol scheme")
+	return "", "", errors.New("no scheme")
 }
