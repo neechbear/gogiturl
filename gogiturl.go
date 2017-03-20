@@ -63,7 +63,9 @@ func mungeGitURL(rawurl string) (string, error) {
 	// user@host.xz:~user/path/to/repo.git/
 	// user@host.xz:path/to/repo.git
 
-	// Hopefully an edge case git@/scp type "URL" syntax.
+	// TODO: a better IPv6 check would be to look for [ at the start of the
+	//       string, or @[ (in the case of a username@), and only then for the
+	//       closing ] after that index location.
 	i := strings.Index(rawurl, "]") // Does it look like we have an IPv6 host
 	j := 0
 	if i < 0 {
